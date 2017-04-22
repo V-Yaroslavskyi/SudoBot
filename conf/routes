@@ -3,14 +3,15 @@
 # ~~~~
 
 # Home page
-GET         /                       controllers.ApplicationController.index
-POST        /inbox                controllers.ApplicationController.inbox
+GET         /                    controllers.ApplicationController.index
+GET         /ping                controllers.ApplicationController.ping
+POST        /inbox               controllers.ApplicationController.inbox
 
 
-GET         /gen-model              controllers.ApplicationController.genModel(pass: Option[String])
+GET         /gen-model           controllers.ApplicationController.genModel(pass: Option[String])
 
 
 # Map static resources from the /public folder to the /assets URL path
-GET         /assets/*file           controllers.Assets.at(path="/public", file)
+GET         /assets/*file        controllers.Assets.at(path="/public", file)
 
     

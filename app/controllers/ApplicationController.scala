@@ -50,6 +50,10 @@ class ApplicationController @Inject()(ws: WSClient, conf: play.api.Configuration
     Ok("ok")
   }
 
+  def ping: Action[AnyContent] = Action { request =>
+    Ok("PONG")
+  }
+
   def inbox: Action[AnyContent] = Action.async { request =>
 
     val js = request.body.asJson.get
