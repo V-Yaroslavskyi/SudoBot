@@ -23,7 +23,9 @@ libraryDependencies ++= Seq(cache, ws, specs2 % Test,
   "org.apache.poi" % "poi" % "3.15",
   "org.apache.poi" % "poi-ooxml" % "3.15",
   "org.apache.poi" % "poi-ooxml-schemas" % "3.15",
-  "org.scala-lang" % "scala-library" % "2.11.7"
+  "org.scala-lang" % "scala-library" % "2.11.7",
+  "org.jsoup" % "jsoup" % "1.10.2",
+  "com.googlecode.json-simple" % "json-simple" % "1.1.1"
 )
 
 unmanagedResourceDirectories in Test <+= baseDirectory(_ / "target/web/public/test")
