@@ -20,6 +20,7 @@ import play.api.libs.json._
 import play.api.libs.ws.ahc.AhcWSResponse
 import play.api.libs.ws.{WSClient, WSResponse}
 import play.api.mvc.{Action, AnyContent, Controller}
+import processors.RecognitionHelper
 import telegram._
 import telegram.methods._
 
@@ -29,7 +30,8 @@ import scala.concurrent.duration.Duration
 import scala.concurrent.{Await, ExecutionContext, Future, Promise}
 import scala.util.{Failure, Random, Success, Try}
 
-class ApplicationController @Inject()(ws: WSClient, conf: play.api.Configuration, cache: CacheApi)
+class ApplicationController @Inject()(ws: WSClient, conf: play.api.Configuration,
+                                      cache: CacheApi, recognitionHelper: RecognitionHelper)
                                      (implicit val exc: ExecutionContext)
   extends Controller {
 
@@ -55,10 +57,8 @@ class ApplicationController @Inject()(ws: WSClient, conf: play.api.Configuration
   }
 
   def inbox: Action[AnyContent] = Action.async { request =>
-
     val js = request.body.asJson.get
     val update = fromJson[Update](js.toString)
-
     val response = (update.message, update.callbackQuery) match {
       case (Some(msg), None) =>
         val mode = cache.get[Int](s"contract_mode:${msg.chat.id}")
@@ -66,147 +66,159 @@ class ApplicationController @Inject()(ws: WSClient, conf: play.api.Configuration
         command match {
           case Some("/start") =>
             start(msg.chat.id)
+
+          case Some("/suit") =>
+            create_suit(msg.chat.id)
+
           case _ =>
             msg.replyToMessage match {
               case Some(x) if msg.text.isDefined =>
                 process_reply(msg, x, mode)
               case _ =>
-                Future successful SendMessage(Left(msg.chat.id), "Я не понимаю этой комманды")
-
+                Future successful Some(SendMessage(Left(msg.chat.id), "Я не понимаю этой комманды"))
             }
         }
-
       case (None, Some(cbq)) =>
         val callbackData = cbq.data.map(_.split(";")) flatMap {
           case Array(c, v) => Some((c, v))
           case _ => None
         }
         callbackData match {
-//          case Some((cbCom, cbVal)) =>
-//            cbCom match {
-//              case "ms" => monitoring_stop(cbq.from.id, cbVal)
-//            }
-          case _ => Future successful errorMsg(cbq.from.id)
+          case Some((cbCom, cbVal)) =>
+            cbCom match {
+              case "marriage" => register_marriage(cbq.from.id)
 
+              case "doc" =>
+                cbVal match {
+                  case "scan" => ask(cbq.from.id,
+                    s"""
+                       |ОК. ТОДІ ЗІСКАНУЙ МЕНІ, БУДЬ ЛАСКА, КОПІЮ СВОГО СВІДОЦТВА ПРО ШЛЮБ
+                       |Ще трішки і цей документ перестане діяти :)
+                    """.stripMargin, "scan")
+
+                  case "photo" => ask(cbq.from.id, "ОК, ТОДІ СФОТКАЙ, БУДЬ ЛАСКА, СВОЄ СВІДОЦТВО ПРО ШЛЮБ", "scan")
+                }
+              //            }
+              case _ => Future successful errorMsg(cbq.from.id)
+
+            }
+          case x =>
+            println("Unknown update " + update)
+            Future successful errorMsg(cbq.from.id)
         }
-      case x =>
-        println("Unknown update " + update)
-        Future successful SendMessage(Right(""), "")
     }
-    response.map { x =>
-      if (x.chatId.isLeft) {
-        Ok(toAnswerJson(x, x.methodName))
-      } else Ok
+    response.map(_.map { x => Ok(toAnswerJson(x, x.methodName)) }.getOrElse(Ok))
+  }
+
+  def start(chatId: Long): Future[Option[SendMessage]] = {
+    Future successful {
+      Some(
+        SendMessage(Left(chatId),
+          """
+            |ПРИВІТ! Я СУДОБОТ.
+            |Я допоможу Тобі підготувати необхідні для суду документи без юриста.
+          """.stripMargin)
+      )
     }
   }
 
-//  def showAnalitycs(chatId: Long): Future[SendMessage] = {
-//    sendMessageToChat(SendMessage(
-//      Left(chatId),
-//      """
-//        |Прогноз для товара "Сахар"
-//        |
-//        |Цена на сегодня: 15037 грн/т
-//        |
-//        |на 1  неделю: 15196 грн/т _+159  грн/т (+ 1.06  %)_
-//        |на 5  недель: 16202 грн/т _+1165 грн/т (+ 6.65  %)_
-//        |на 10 недель: 17012 грн/т _+1975 грн/т (+ 13.13 %)_
-//        |
-//        |Изменение цены с доверительным интервалом в 90%:
-//      """.stripMargin,
-//      parseMode = Some(ParseMode.Markdown)
-//    )).onComplete { _ =>
-//      val bodyParts = List(
-//        new StringPart("chat_id", s"$chatId", "UTF-8"),
-//        new FilePart("photo", new File(s"${
-//          conf.getString("filePrefix").get
-//        }public/images/sugar90new.png"))
-//      )
-//      val client = ws.underlying.asInstanceOf[AsyncHttpClient]
-//
-//      val builder = client.preparePost(url + "/sendPhoto")
-//
-//      builder.setHeader("Content-Type", "multipart/form-data")
-//      bodyParts.foreach(builder.addBodyPart)
-//
-//      val result = Promise[WSResponse]()
-//
-//      client.executeRequest(builder.build(), new AsyncCompletionHandler[Response]() {
-//        override def onCompleted(response: Response): Response = {
-//          result.success(AhcWSResponse(response))
-//          response
-//        }
-//
-//        override def onThrowable(t: Throwable): Unit = {
-//          result.failure(t)
-//        }
-//      })
-//    }
-//    Future successful SendMessage(Right(""), "")
-//  }
-//
-//  def askQuantity(chatId: Long, bidId: Int): Future[SendMessage] = {
-//    sendMessageToChat(SendMessage(Left(chatId), "Введите количество едениц товара", replyMarkup = Some(ForceReply()))).map { mid =>
-//      cache.set(s"reply:$chatId:$mid", "quantity")
-//      SendMessage(Left(chatId), "Например просто \"500\" или \"0.2\"")
-//    }
-//  }
-//
-//  def askPrice(chatId: Long): Future[SendMessage] = {
-//    sendMessageToChat(SendMessage(Left(chatId),
-//      s"""Укажите цену за единицу в гривнах.""".stripMargin,
-//      replyMarkup = Some(ForceReply()))).map { mid =>
-//      cache.set(s"reply:$chatId:$mid", "price")
-//      SendMessage(Left(chatId), "Например просто \"12543.2\" или \"10\"")
-//    }
-//  }
-//
-//  def askTax(chatId: Long, bidId: Int): Future[SendMessage] = {
-//
-//    val keyboard = InlineKeyboardMarkup(
-//      Seq(
-//        Seq(InlineKeyboardButton("Да", Some(s"c_b6;y:$bidId"))),
-//        Seq(InlineKeyboardButton("Нет", Some(s"c_b6;n:$bidId")))
-//      )
-//    )
-//    Future successful SendMessage(Left(chatId), "Поставка будет с НДС?", replyMarkup = Some(keyboard))
-//  }
-//
-//  def askDate(chatId: Long, redisKey: String): Future[SendMessage] = {
-//    sendMessageToChat(SendMessage(Left(chatId),
-//      s"""Укажите дату в формате ДД.ММ.ГГГГ .""".stripMargin,
-//      replyMarkup = Some(ForceReply()))).map { mid =>
-//      cache.set(s"reply:$chatId:$mid", redisKey)
-//      SendMessage(Left(chatId), "Например \"01.04.2017\" или \"27.06.2018\"")
-//    }
-//  }
-
-  def start(chatId: Long): Future[SendMessage] = {
+  def create_suit(chatId: Long): Future[Option[SendMessage]] = {
     val buttons = Seq(
       Seq(
-        KeyboardButton("Розірвати шлюб"),
-        KeyboardButton("Стягнути борг")
+        InlineKeyboardButton("Розірвати шлюб", Some("marriage")),
+        InlineKeyboardButton("Стягнути борг", Some("dept"))
       )
     )
-    val keyboard = ReplyKeyboardMarkup(buttons, oneTimeKeyboard = Some(true))
+    val keyboard = InlineKeyboardMarkup(buttons)
 
     Future successful {
-      SendMessage(Left(chatId),
-        """
-          |ПРИВІТ! Я СУДОБОТ.
-          |Я допоможу Тобі підготувати необхідні для суду документи без юриста.
-          |Що тобі потрібно?
-        """.stripMargin,
-        replyMarkup = Some(keyboard))
+      Some(
+        SendMessage(Left(chatId),
+          """
+            |Я допоможу Тобі підготувати необхідні для суду документи без юриста.
+            |Що тобі потрібно?
+          """.stripMargin,
+          replyMarkup = Some(keyboard))
+      )
     }
   }
 
-  def process_reply(msg: Message, replyTo: Message, mode: Option[Int]): Future[SendMessage] = {
+  def register_marriage(chatId: Long): Future[Option[SendMessage]] = {
+    val buttons = Seq(
+      Seq(
+        InlineKeyboardButton("ТАК, БЕЗ ПИТАНЬ", Some("doc:scan")),
+        InlineKeyboardButton("КРАЩЕ ФОТО З ТЕЛЕФОНУ", Some("doc:photo"))
+      )
+    )
+    val keyboard = InlineKeyboardMarkup(buttons)
+
+    Future successful {
+      Some(
+        SendMessage(Left(chatId),
+          """
+            |МЕНІ ПОТРІБНІ ВІД ТЕБЕ ДЕЯКІ ДОКУМЕНТИ.
+            |НЕ ХВИЛЮЙСЯ, ВСЕ КОНФІДЕНЦІЙНО.
+            |
+            |Я СПРОБУЮ САМ ВІДНАЙТИ В ДОКУМЕНТАХ НЕОБХІДНУ ІНФОРМАЦІЮ.
+            |ЯКЩО НЕ ЗМОЖУ, ПОПРОШУ ТЕБЕ ВВЕСТИ ВРУЧНУ.
+            |
+            |ТОБІ ЗРУЧНО ДАТИ МЕНІ СКАНИ?
+            |
+          """.stripMargin,
+          replyMarkup = Some(keyboard))
+      )
+    }
+  }
+
+  def ask(chatId: Long, text: String, redisKey: String): Future[Option[SendMessage]] = {
+    sendMessageToChat(SendMessage(Left(chatId), text,
+      replyMarkup = Some(ForceReply()))).map { mid =>
+      cache.set(s"reply:$chatId:$mid", redisKey)
+      None
+    }
+  }
+
+  def process_scan(chatId: Long, msg: Message): Future[Option[SendMessage]] = {
+    recognitionHelper.recoginzeScan().map { rr =>
+      cache.set(s"scan:$chatId", rr)
+      sendMessageToChat(
+        SendMessage(
+          Left(chatId), {
+            val lst = List(
+              rr.nameHusband.map(x => s"Ім'я чоловіка: $x"),
+              rr.nameWife.map(x => s"Ім'я дружини: $x"),
+              rr.date.map(x => s"Дата реєстарції: $x"),
+              rr.actRecordNumber.map(x => s"Номер акту рестрації: $x"),
+              rr.series.map(x => s"Серія: $x"),
+              rr.number.map(x => s"Номер: $x")
+            )
+            if (lst.nonEmpty)
+              "Я зміг розпізнати такі дані" + lst.mkString("\n")
+            else "Я не зміг розпізнати ніяких даних"
+          }
+        )
+      )
+    }
+
+    Future successful Some(SendMessage(Left(chatId), "СУПЕР! ЗАРАЗ СПРОБУЮ ВЗЯТИ ПОТРІБНУ ІНФУ"))
+
+  }
+
+  def process_photo(chatId: Long, msg: Message): Future[Option[SendMessage]] =
+
+    Future successful Some(SendMessage(Left(chatId), "СУПЕР! ЗАРАЗ СПРОБУЮ ВЗЯТИ ПОТРІБНУ ІНФУ"))
+
+  def process_reply(msg: Message, replyTo: Message, mode: Option[Int]): Future[Option[SendMessage]] = {
 
     val cv = cache.get[String](s"reply:${msg.chat.id}:${replyTo.messageId}")
     cv.map(_.split(":").toList) map {
-      case "auth_code" :: Nil if mode.isDefined =>
-        Future successful errorMsg(msg.chat.id)
+      case "scan" :: Nil if mode.isDefined =>
+        process_scan(msg.chat.id, msg)
+
+      case "photo" :: Nil if mode.isDefined =>
+        process_photo(msg.chat.id, msg)
+
+
     } getOrElse (Future successful errorMsg(msg.chat.id))
   }
 
@@ -239,12 +251,13 @@ class ApplicationController @Inject()(ws: WSClient, conf: play.api.Configuration
     }
   }
 
-  def errorMsg(chatId: Long): SendMessage = {
-    SendMessage(Left(chatId),
+  def errorMsg(chatId: Long): Option[SendMessage] = {
+    Some(SendMessage(Left(chatId),
       """
         |Возникла проблема.
         |Пожалуйста, напишите об этом в поддержку, (комманда /feedback ) указав имя и номер телефона.
       """.stripMargin
+    )
     )
   }
 
