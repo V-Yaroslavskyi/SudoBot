@@ -20,7 +20,7 @@ import play.api.libs.json._
 import play.api.libs.ws.ahc.AhcWSResponse
 import play.api.libs.ws.{WSClient, WSResponse}
 import play.api.mvc.{Action, AnyContent, Controller}
-import processors.RecognitionHelper
+import processors.{RecognitionHelper, RecognitionResult}
 import telegram._
 import telegram.methods._
 
@@ -86,7 +86,14 @@ class ApplicationController @Inject()(ws: WSClient, conf: play.api.Configuration
         callbackData match {
           case Some((cbCom, cbVal)) =>
             cbCom match {
-              case "marriage" => register_marriage(cbq.from.id)
+              case "suit" =>
+                cbVal match {
+                  case "marriage" =>
+                    register_marriage(cbq.from.id)
+                  case "debt" =>
+                    Future successful Some(SendMessage(Left(cbq.from.id), "Ця функція на даний момент недоступна"))
+                }
+
 
               case "doc" =>
                 cbVal match {
@@ -97,8 +104,15 @@ class ApplicationController @Inject()(ws: WSClient, conf: play.api.Configuration
                     """.stripMargin, "scan")
 
                   case "photo" => ask(cbq.from.id, "ОК, ТОДІ СФОТКАЙ, БУДЬ ЛАСКА, СВОЄ СВІДОЦТВО ПРО ШЛЮБ", "scan")
+
+                  case "none" =>
+                    cache.set(s"scan:${cbq.from.id}", RecognitionResult(None, None, None, None, None, None))
+                    askNextQuestion(cbq.from.id)
                 }
-              //            }
+
+              case "change" =>
+                ask(cbq.from.id, "Введіть нове значення", cbVal)
+
               case _ => Future successful errorMsg(cbq.from.id)
 
             }
@@ -125,8 +139,8 @@ class ApplicationController @Inject()(ws: WSClient, conf: play.api.Configuration
   def create_suit(chatId: Long): Future[Option[SendMessage]] = {
     val buttons = Seq(
       Seq(
-        InlineKeyboardButton("Розірвати шлюб", Some("marriage")),
-        InlineKeyboardButton("Стягнути борг", Some("dept"))
+        InlineKeyboardButton("Розірвати шлюб", Some("suit;marriage")),
+        InlineKeyboardButton("Стягнути борг", Some("suit;debt"))
       )
     )
     val keyboard = InlineKeyboardMarkup(buttons)
@@ -145,10 +159,10 @@ class ApplicationController @Inject()(ws: WSClient, conf: play.api.Configuration
 
   def register_marriage(chatId: Long): Future[Option[SendMessage]] = {
     val buttons = Seq(
-      Seq(
-        InlineKeyboardButton("ТАК, БЕЗ ПИТАНЬ", Some("doc:scan")),
-        InlineKeyboardButton("КРАЩЕ ФОТО З ТЕЛЕФОНУ", Some("doc:photo"))
-      )
+      Seq(InlineKeyboardButton("ТАК, БЕЗ ПИТАНЬ", Some("doc;scan"))),
+      Seq(InlineKeyboardButton("КРАЩЕ ФОТО З ТЕЛЕФОНУ", Some("doc;photo"))),
+      Seq(InlineKeyboardButton("В МЕНЕ ЙОГО НАРАЗІ НЕМАЄ", Some("doc;none")))
+
     )
     val keyboard = InlineKeyboardMarkup(buttons)
 
@@ -178,26 +192,82 @@ class ApplicationController @Inject()(ws: WSClient, conf: play.api.Configuration
     }
   }
 
+  def askNextQuestion(chatId: Long): Future[Option[SendMessage]] = {
+    cache.get[RecognitionResult](s"scan:$chatId").map {
+      case RecognitionResult(None, _, _, _, _, _) => ask(chatId, "Введіть і'мя чоловіка", "husbandName")
+      case RecognitionResult(Some(_), None, _, _, _, _) => ask(chatId, "Введіть і'мя дружини", "wifeName")
+      case RecognitionResult(Some(_), Some(_), None, _, _, _) => ask(chatId, "Введіть дату одруження", "date")
+      case RecognitionResult(Some(_), Some(_), Some(_), None, _, _) => ask(chatId, "Введіть серію свідотства", "series")
+      case RecognitionResult(Some(_), Some(_), Some(_), Some(_), None, _) => ask(chatId, "Введіть номер свідотства", "number")
+      case RecognitionResult(Some(_), Some(_), Some(_), Some(_), Some(_), None) => ask(chatId, "Введіть номер акту реєстрації", "actRegistrationNumber")
+      case RecognitionResult(Some(_), Some(_), Some(_), Some(_), Some(_), Some(_)) => check_data(chatId)
+    }.getOrElse(
+      Future successful errorMsg(chatId)
+    )
+  }
+
+
+  def check_data(chatId: Long): Future[Option[SendMessage]] = {
+    Future successful
+      cache.get[RecognitionResult](s"scan:$chatId").flatMap { rr =>
+        val lst = List(
+          rr.nameHusband.map(x => s"Ім'я чоловіка: $x"),
+          rr.nameWife.map(x => s"Ім'я дружини: $x"),
+          rr.date.map(x => s"Дата реєстарції: ${dtf.print(x.getTime)}"),
+          rr.actRecordNumber.map(x => s"Номер акту рестрації: $x"),
+          rr.series.map(x => s"Серія свідотсва про шлюб: $x"),
+          rr.number.map(x => s"Номер свідотства про шлюб: $x")
+        )
+        val buttons = Seq(
+          Seq(
+            InlineKeyboardButton("Ім'я чоловіка", Some("change;husbandName")),
+            InlineKeyboardButton("Ім'я дружини", Some("change;wifeName"))
+          ),
+          Seq(
+            InlineKeyboardButton("Дата реєстарції", Some("change;date")),
+            InlineKeyboardButton("Номер акту рестрації", Some("change;actRegistrationNumber"))
+          ),
+          Seq(
+            InlineKeyboardButton("Серія свідотсва про шлюб", Some("change;series")),
+            InlineKeyboardButton("Номер свідотства про шлюб", Some("change;number"))
+          ),
+          Seq(
+            InlineKeyboardButton("Все вірно", Some("status;ok"))
+          )
+        )
+        val keyboard = InlineKeyboardMarkup(buttons)
+
+        Some(
+          SendMessage(
+            Left(chatId),
+            "Введені дані:" + lst.flatten.mkString("\n", "\n", "\n") + " Якщо хочеш щось змінити - натисни відповідну кнопку знизу.",
+            replyMarkup = Some(keyboard)
+          )
+        )
+      }
+  }
+
   def process_scan(chatId: Long, msg: Message): Future[Option[SendMessage]] = {
     recognitionHelper.recoginzeScan().map { rr =>
       cache.set(s"scan:$chatId", rr)
+      val lst = List(
+        rr.nameHusband.map(x => s"Ім'я чоловіка: $x"),
+        rr.nameWife.map(x => s"Ім'я дружини: $x"),
+        rr.date.map(x => s"Дата реєстарції: ${dtf.print(x.getTime)}"),
+        rr.actRecordNumber.map(x => s"Номер акту рестрації: $x"),
+        rr.series.map(x => s"Серія свідотсва про шлюб: $x"),
+        rr.number.map(x => s"Номер свідотства про шлюб: $x")
+      )
       sendMessageToChat(
         SendMessage(
           Left(chatId), {
-            val lst = List(
-              rr.nameHusband.map(x => s"Ім'я чоловіка: $x"),
-              rr.nameWife.map(x => s"Ім'я дружини: $x"),
-              rr.date.map(x => s"Дата реєстарції: $x"),
-              rr.actRecordNumber.map(x => s"Номер акту рестрації: $x"),
-              rr.series.map(x => s"Серія: $x"),
-              rr.number.map(x => s"Номер: $x")
-            )
-            if (lst.nonEmpty)
-              "Я зміг розпізнати такі дані" + lst.mkString("\n")
+            if (lst.flatten.nonEmpty)
+              "Я зміг розпізнати такі дані:\n" + lst.flatten.mkString("\n")
             else "Я не зміг розпізнати ніяких даних"
           }
         )
       )
+      askNextQuestion(chatId)
     }
 
     Future successful Some(SendMessage(Left(chatId), "СУПЕР! ЗАРАЗ СПРОБУЮ ВЗЯТИ ПОТРІБНУ ІНФУ"))
@@ -212,11 +282,84 @@ class ApplicationController @Inject()(ws: WSClient, conf: play.api.Configuration
 
     val cv = cache.get[String](s"reply:${msg.chat.id}:${replyTo.messageId}")
     cv.map(_.split(":").toList) map {
-      case "scan" :: Nil if mode.isDefined =>
+      case "scan" :: Nil =>
         process_scan(msg.chat.id, msg)
 
-      case "photo" :: Nil if mode.isDefined =>
+      case "photo" :: Nil =>
         process_photo(msg.chat.id, msg)
+
+      case "husbandName" :: Nil =>
+        cache.get[RecognitionResult](s"scan:${msg.chat.id}").map { x =>
+          cache.set(s"scan:${msg.chat.id}", x.copy(nameHusband = msg.text))
+          sendMessageToChat(
+            msg.text.map { r =>
+              SendMessage(Left(msg.chat.id), s"Повне ім'я чоловіка вказано як $r")
+            }.getOrElse(SendMessage(Left(msg.chat.id), "Помилка розпізнавання даних"))
+          )
+        }
+        askNextQuestion(msg.chat.id)
+
+      case "wifeName" :: Nil =>
+        cache.get[RecognitionResult](s"scan:${msg.chat.id}").map { x =>
+          cache.set(s"scan:${msg.chat.id}", x.copy(nameWife = msg.text))
+          sendMessageToChat(
+            msg.text.map { r =>
+              SendMessage(Left(msg.chat.id), s"Повне ім'я дружини вказано як $r")
+            }.getOrElse(SendMessage(Left(msg.chat.id), "Помилка розпізнавання даних"))
+          )
+        }
+        askNextQuestion(msg.chat.id)
+
+      case "date" :: Nil =>
+        cache.get[RecognitionResult](s"scan:${msg.chat.id}").map { x =>
+          val v = msg.text.flatMap(t => Try(dtf.parseLocalDate(t).toDate).toOption)
+          cache.set(s"scan:${msg.chat.id}", x.copy(date = v))
+          sendMessageToChat(
+            v.map { r =>
+              SendMessage(Left(msg.chat.id), s"Дата одруження вказана як $r")
+            }.getOrElse(SendMessage(Left(msg.chat.id), "Помилка розпізнавання даних"))
+          )
+        }
+        askNextQuestion(msg.chat.id)
+
+      case "series" :: Nil =>
+        cache.get[RecognitionResult](s"scan:${msg.chat.id}").map { x =>
+          cache.set(s"scan:${msg.chat.id}", x.copy(series = msg.text))
+          sendMessageToChat(
+            msg.text.map { r =>
+              SendMessage(Left(msg.chat.id), s"Серія свідотсва про шлюб вказана як $r")
+            }.getOrElse(SendMessage(Left(msg.chat.id), "Помилка розпізнавання даних"))
+          )
+        }
+        askNextQuestion(msg.chat.id)
+
+      case "number" :: Nil =>
+        cache.get[RecognitionResult](s"scan:${msg.chat.id}").map { x =>
+          val v = msg.text.flatMap(t => Try(BigDecimal(t)).toOption)
+          cache.set(s"scan:${msg.chat.id}", x.copy(number = v))
+          sendMessageToChat(
+            v.map { r =>
+              SendMessage(Left(msg.chat.id), s"Номер свідотсва про шлюб вказаний як $r")
+            }.getOrElse(SendMessage(Left(msg.chat.id), "Помилка розпізнавання даних"))
+          )
+        }
+        askNextQuestion(msg.chat.id)
+
+      case "actRegistrationNumber" :: Nil =>
+        cache.get[RecognitionResult](s"scan:${msg.chat.id}").map { x =>
+          val v = msg.text.flatMap(t => Try(BigDecimal(t)).toOption)
+          cache.set(s"scan:${msg.chat.id}", x.copy(actRecordNumber = v))
+          sendMessageToChat(
+            v.map { r =>
+              SendMessage(Left(msg.chat.id), s"Номер акту реєстрації вказано як $r")
+            }.getOrElse(SendMessage(Left(msg.chat.id), "Помилка розпізнавання даних"))
+          )
+        }
+        askNextQuestion(msg.chat.id)
+
+
+      case _ =>
+        Future successful errorMsg(msg.chat.id)
 
 
     } getOrElse (Future successful errorMsg(msg.chat.id))
