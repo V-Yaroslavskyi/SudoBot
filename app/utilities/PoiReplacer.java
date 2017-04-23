@@ -89,16 +89,24 @@ public class PoiReplacer {
             final XWPFDocument doc = new XWPFDocument(OPCPackage.open(fileName));
 
             // replacing in plain doc text
-            doc.getParagraphs().forEach(p -> replaceInParagraph(p, replacements));
+            for(XWPFParagraph p: doc.getParagraphs()){
+                replaceInParagraph(p, replacements);
+            }
 
             // replacing in table, walking through all of cells
             // for every table, for its every row, for every cell in row and every paragraph in cell (actually < three)
 
-            doc.getTables().stream()
-                    .flatMap(table -> table.getRows().stream()) // getting all rows
-                    .flatMap(cell -> cell.getTableCells().stream()) // getting all cells
-                    .flatMap(row -> row.getParagraphs().stream()) // getting all paragraphs
-                    .forEach(p -> replaceInParagraph(p, replacements)); // replace in all of paragraphs of all cells
+
+            List<XWPFTable> tables = doc.getTables();
+            for (XWPFTable table : doc.getTables()){
+                for (XWPFTableRow row : table.getRows()){
+                    for(XWPFTableCell cell : row.getTableCells()) {
+                        for (XWPFParagraph p : cell.getParagraphs()) {
+                            replaceInParagraph(p, replacements);
+                        }
+                    }
+                }
+            }
 
             // end of in-table replacement, save document
 
