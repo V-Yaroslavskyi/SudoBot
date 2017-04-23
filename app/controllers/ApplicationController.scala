@@ -23,6 +23,7 @@ import play.api.mvc.{Action, AnyContent, Controller}
 import processors.{RecognitionHelper, RecognitionResult}
 import telegram._
 import telegram.methods._
+import utilities.{Child, PoiReplacer}
 
 import scala.collection.JavaConversions._
 import scala.collection.mutable.ListBuffer
@@ -31,7 +32,8 @@ import scala.concurrent.{Await, ExecutionContext, Future, Promise}
 import scala.util.{Failure, Random, Success, Try}
 
 class ApplicationController @Inject()(ws: WSClient, conf: play.api.Configuration,
-                                      cache: CacheApi, recognitionHelper: RecognitionHelper)
+                                      cache: CacheApi, recognitionHelper: RecognitionHelper,
+                                     poiReplacer: PoiReplacer)
                                      (implicit val exc: ExecutionContext)
   extends Controller {
 
@@ -49,6 +51,16 @@ class ApplicationController @Inject()(ws: WSClient, conf: play.api.Configuration
     new EnumNameSerializer(ParseMode)
 
   def index: Action[AnyContent] = Action { request =>
+//    val reps =  Map(
+//      "@courtName" -> "BEST COURT EVER", "@courtAddr" -> "BEST COURT ADDR",
+//      "@plaintiffName" -> "Іваненко Ганна Дмитрівна", "@plaintiffAddr" -> "addr 1", "@plaintiffMailAddr" -> "mail addr 1", "@plaintiffTaxId" -> "1111111111111111111",
+//      "@defendantName" -> "Петренко Джон Людвігович", "@defendantAddr" -> "def addr", "@defendantRealAddr" -> "def real addr", "@defendantTaxId" -> "222222222222222222",
+//      "@childrenLiveWith" -> "з матір'ю",
+//      "@marriageDate" -> "01.01.1991", "@registeredBy" -> " ZAGS", "@actNumber" -> "777", "@actSeries" -> "TT", "@actNumber" -> "123456", "@marriageSertDate" -> "02.01.1991"
+//    )
+//
+//    val cont = poiReplacer.buildDoc(reps, List(new Child("AA B. C.", "3.4.2009", "8"),new Child("AA B. C.", "1.2.2008", "9") ), "NAME_OF_RES")
+//    Ok.sendFile(cont)
     Ok("ok")
   }
 
@@ -113,7 +125,23 @@ class ApplicationController @Inject()(ws: WSClient, conf: play.api.Configuration
               case "change" =>
                 ask(cbq.from.id, "Введіть нове значення", cbVal)
 
-              case _ => Future successful errorMsg(cbq.from.id)
+              case "status" =>
+                askChildren(cbq.from.id)
+
+              case "children" =>
+                cbVal match {
+                  case "yes" =>
+                    ask(cbq.from.id, "Введіть повне ім'я дитини", "childName")
+
+                  case "no" =>
+                    ask(cbq.from.id,
+                      s"""
+                         |ОК. ТОДІ ЗІСКАНУЙ МЕНІ, БУДЬ ЛАСКА, КОПІЮ СВОГО СВІДОЦТВА ПРО ШЛЮБ
+                         |Ще трішки і цей документ перестане діяти :)
+                    """.stripMargin, "scan")
+                }
+
+                  case _ => Future successful errorMsg(cbq.from.id)
 
             }
           case x =>
@@ -132,6 +160,21 @@ class ApplicationController @Inject()(ws: WSClient, conf: play.api.Configuration
             |ПРИВІТ! Я СУДОБОТ.
             |Я допоможу Тобі підготувати необхідні для суду документи без юриста.
           """.stripMargin)
+      )
+    }
+  }
+
+  def askChildren(chatId: Long, firstTime: Boolean = true): Future[Option[SendMessage]] = {
+    val buttons = Seq(
+      Seq(InlineKeyboardButton("ТАК", Some("children;yes"))),
+      Seq(InlineKeyboardButton("НІ", Some("children;no")))
+    )
+
+    val keyboard = InlineKeyboardMarkup(buttons)
+    val cld = cache.get[List[(String, Option[Date])]](s"children:$chatId").getOrElse(List())
+    Future successful {
+      Some(
+        SendMessage(Left(chatId), if(firstTime) "У вас є діти?" else cld.map(x => s"${x._1} (${x._2})") + "У вас є ще діти?", replyMarkup = Some(keyboard))
       )
     }
   }
@@ -316,7 +359,7 @@ class ApplicationController @Inject()(ws: WSClient, conf: play.api.Configuration
           cache.set(s"scan:${msg.chat.id}", x.copy(date = v))
           sendMessageToChat(
             v.map { r =>
-              SendMessage(Left(msg.chat.id), s"Дата одруження вказана як $r")
+              SendMessage(Left(msg.chat.id), s"Дата одруження вказана як ${dtf.print(r.getTime)}")
             }.getOrElse(SendMessage(Left(msg.chat.id), "Помилка розпізнавання даних"))
           )
         }
@@ -356,6 +399,31 @@ class ApplicationController @Inject()(ws: WSClient, conf: play.api.Configuration
           )
         }
         askNextQuestion(msg.chat.id)
+
+      case "childName" :: Nil =>
+        sendMessageToChat(
+          msg.text.map { r =>
+            SendMessage(Left(msg.chat.id), s"Повне ім'я дитини вказано як $r")
+          }.getOrElse(SendMessage(Left(msg.chat.id), "Помилка розпізнавання даних"))
+        )
+        msg.text.map {x =>
+          val cld = cache.get[List[(String, Option[Date])]](s"children:${msg.chat.id}").getOrElse(List())
+          cache.set(s"children:${msg.chat.id}", (x, None) :: cld)
+          ask(msg.chat.id, "Введіть дату народження дитини", "childDate")
+        }.getOrElse(ask(msg.chat.id, "Введіть повне ім'я дитини", "childName"))
+
+      case "childDate" :: Nil =>
+        val v = msg.text.flatMap(t => Try(dtf.parseLocalDate(t).toDate).toOption)
+        sendMessageToChat(
+        v.map { r =>
+            SendMessage(Left(msg.chat.id), s"Дата народження дитини вказано як $r")
+          }.getOrElse(SendMessage(Left(msg.chat.id), "Помилка розпізнавання даних"))
+        )
+        msg.text.map {x =>
+          val cld = cache.get[List[(String, Option[Date])]](s"children:${msg.chat.id}").getOrElse(List())
+          cache.set(s"children:${msg.chat.id}", (cld.head, v) :: cld.tail)
+          askChildren(msg.chat.id)
+        }.getOrElse(ask(msg.chat.id, "Введіть дату народження дитини", "childDate"))
 
 
       case _ =>
